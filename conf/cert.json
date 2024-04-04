@@ -1,0 +1,18 @@
+[
+    {
+        "common_name": "example1.com",
+        "country": "US",
+        "state": "California",
+        "locality": "Mountain View",
+        "organization": "Example Inc.",
+        "organizational_unit": "IT"
+    },
+    {
+        "common_name": "example2.com",
+        "country": "US",
+        "state": "New York",
+        "locality": "New York City",
+        "organization": "Example Corp.",
+        "organizational_unit": "DevOps"
+    }
+]
