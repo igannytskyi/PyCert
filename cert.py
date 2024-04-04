@@ -53,6 +53,5 @@ def generate_csr_from_json(json_file):
         with open(f"output/{common_name}.key", "wb") as private_key_file:
             private_key_file.write(private_key_bytes)
 
-
 # Example usage
 generate_csr_from_json('conf/cert.json')
