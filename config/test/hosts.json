@@ -1,0 +1,34 @@
+{
+  "hosts": [
+    {
+      "host_name": "webserver1.example.com",
+      "ip": "192.168.1.1",
+      "roles": ["WebServer", "IIS"],
+      "cert_store": "My"
+    },
+    {
+      "host_name": "webserver2.example.com",
+      "ip": "192.168.1.2",
+      "roles": ["WebServer", "IIS"],
+      "cert_store": "My"
+    },
+    {
+      "host_name": "webserver3.example.com",
+      "ip": "192.168.1.3",
+      "roles": ["WebServer", "IIS"],
+      "cert_store": "My"
+    },
+    {
+      "host_name": "webserver4.example.com",
+      "ip": "192.168.1.4",
+      "roles": ["WebServer", "IIS"],
+      "cert_store": "My"
+    },
+    {
+      "host_name": "webserver5.example.com",
+      "ip": "192.168.1.5",
+      "roles": ["WebServer", "IIS"],
+      "cert_store": "My"
+    }
+  ]
+}

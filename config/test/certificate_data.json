@@ -1,0 +1,17 @@
+{
+  "common_name": "example.com",
+  "organization": "Example Organization",
+  "organizational_unit": "IT Department",
+  "country": "US",
+  "state": "California",
+  "locality": "San Francisco",
+  "validity_days": 365,
+  "key_size": 2048,
+  "certificate_authority": "Your CA Name",
+  "subject_alternative_names": [
+    "www.example.com",
+    "mail.example.com",
+    "ftp.example.com",
+    "api.example.com"
+  ]
+}
