@@ -26,6 +26,19 @@ certificate_management/
 │   ├── key_manager.py            # Handles private key management
 │   ├── rbac.py                   # Role-Based Access Control management
 │
+├── config/
+│   ├── dev/
+│   │   ├── certificate_data.json     # JSON configuration for certificate data in dev environment
+│   │   ├── hosts.json                # JSON configuration for hosts in dev environment
+│   │
+│   ├── test/
+│   │   ├── certificate_data.json     # JSON configuration for certificate data in test environment
+│   │   ├── hosts.json                # JSON configuration for hosts in test environment
+│   │
+│   ├── prod/
+│   │   ├── certificate_data.json     # JSON configuration for certificate data in prod environment
+│   │   ├── hosts.json                # JSON configuration for hosts in prod environment 
+│
 ├── utils/
 │   ├── __init__.py               # Initialize the utilities package
 │   ├── api_client.py             # Handles communication with external APIs
