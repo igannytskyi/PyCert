@@ -1,6 +1,6 @@
 # tracks the status and information of issued certificates
 
-сlass CertificateTracker:
+class CertificateTracker:
     def __init__(self):
         self.tracked_certificates = {}
 
