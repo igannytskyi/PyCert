@@ -126,36 +126,40 @@ def get_attachment_folder():
     return current_attachment_folder
 
 def download_attachment(url, filename):
-    """Download an attachment from Jira and save it correctly."""
+    """Download an attachment from Jira using its API and save it correctly."""
     try:
         headers = {
             "Accept": "application/octet-stream",  # Force raw file download
             "X-Atlassian-Token": "no-check"
         }
-
-        # Add `?direct=true` to the URL for direct file access
-        direct_url = f"{url}?direct=true"
-
-        response = requests.get(direct_url, auth=AUTH, headers=headers, stream=True, verify=False)
         
-        # Check if response is not a valid file (HTML preview page)
+        # We will extract the actual download URL for the file.
+        # Jira REST API provides the 'content' field which contains the URL of the actual file.
+        
+        attachment_url = f"{url}?direct=true"  # We force the direct download using the `direct=true` flag
+        
+        response = requests.get(attachment_url, auth=AUTH, headers=headers, stream=True, verify=False)
+        
+        # If we get an HTML preview, we'll attempt to extract the correct file URL from the preview page
         if response.status_code == 200 and "text/html" in response.headers.get("Content-Type", ""):
-            # Try to get the actual file URL from the preview page
-            print(f"⚠ Warning: {filename} is a preview page. Extracting file URL...")
+            print(f"⚠ {filename} is a preview page. Attempting to extract direct URL...")
 
-            # Extract the download link from the preview page HTML using regex
+            # Try parsing the HTML page to extract the correct file URL
+            # (We attempt to extract the real file location from the HTML page)
             download_url_match = re.search(r'window\.location="([^"]+)"', response.text)
+            
             if download_url_match:
                 download_url = download_url_match.group(1)
-                print(f"🔄 Redirecting to file URL: {download_url}")
+                print(f"🔄 Redirecting to the actual download URL: {download_url}")
                 response = requests.get(download_url, auth=AUTH, headers=headers, stream=True, verify=False)
             else:
                 print(f"❌ No direct download URL found for {filename}. Skipping file.")
                 return None
-
+        
+        # Check if response is still valid (should be a file content)
         response.raise_for_status()
-
-        # Ensure attachments are stored in structured folders
+        
+        # Save the attachment to the structured folder
         folder = get_attachment_folder()
         filepath = os.path.join(folder, filename)
 
