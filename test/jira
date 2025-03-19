@@ -3,6 +3,7 @@ import json
 import requests
 import threading
 from requests.auth import HTTPBasicAuth
+from queue import Queue
 
 # Jira Configuration
 JIRA_BASE_URL = "https://yourcompany.atlassian.net"
@@ -28,6 +29,7 @@ os.makedirs(current_attachment_folder, exist_ok=True)
 # Pagination & Performance Settings
 BATCH_SIZE = 500
 MAX_RETRIES = 3
+NUM_THREADS = 5  # Number of concurrent threads
 
 # Authenticate and Get Session Token
 def get_jira_session():
@@ -123,12 +125,26 @@ def get_attachment_folder():
     return current_attachment_folder
 
 def download_attachment(url, filename):
-    """Download an attachment from Jira and save it in a structured folder."""
+    """Download an attachment from Jira and save it correctly."""
     try:
-        response = requests.get(url, auth=AUTH, headers=HEADERS, stream=True)
+        headers = {
+            "Accept": "*/*",
+            "X-Atlassian-Token": "no-check"  # Prevents Jira from serving preview pages
+        }
+        
+        # Force direct download
+        direct_url = f"{url}?direct=true"
+
+        response = requests.get(direct_url, auth=AUTH, headers=headers, stream=True, verify=False)
         response.raise_for_status()
         
-        folder = get_attachment_folder()  # Get correct folder to store file
+        # Check content type to avoid HTML preview pages
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "text/html" in content_type:
+            print(f"⚠ Warning: {filename} might be a preview page instead of the actual file.")
+
+        # Ensure attachments are stored in structured folders
+        folder = get_attachment_folder()
         filepath = os.path.join(folder, filename)
 
         with open(filepath, "wb") as f:
@@ -140,10 +156,56 @@ def download_attachment(url, filename):
         print(f"Failed to download {filename}: {e}")
         return None
 
+def save_progress(last_index):
+    """Save export progress for resuming."""
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump({"last_index": last_index}, f)
+
+def load_progress():
+    """Load the last export progress point."""
+    if os.path.exists(CHECKPOINT_FILE):
+        with open(CHECKPOINT_FILE, "r") as f:
+            return json.load(f).get("last_index", 0)
+    return 0
+
+def process_issue(issue):
+    """Process an individual issue (fetch comments & attachments)."""
+    issue_key = issue["key"]
+    summary = issue["fields"].get("summary", "No Summary")
+    description = issue["fields"].get("description", "No Description")
+
+    # Process issue attachments
+    attachments = []
+    for attachment in issue["fields"].get("attachment", []):
+        filename = f"{issue_key}_{attachment['filename']}"
+        file_path = download_attachment(attachment["content"], filename)
+        if file_path:
+            attachments.append({"filename": attachment["filename"], "path": file_path})
+
+    # Fetch comments and check for attachments
+    comments = fetch_comments(issue_key)
+
+    return {
+        "issue_key": issue_key,
+        "summary": summary,
+        "description": description,
+        "attachments": attachments,
+        "comments": comments
+    }
+
+def worker(queue, output_file):
+    """Thread worker function to process issues from queue."""
+    while not queue.empty():
+        issue = queue.get()
+        processed_issue = process_issue(issue)
+        with open(output_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(processed_issue) + "\n")
+        queue.task_done()
+
 def process_issues():
-    """Fetch, process, and store issues with comments and attachments."""
-    last_index = 0  # Resume from here if needed
-    part = 1
+    """Fetch, process, and store issues with comments and attachments using multi-threading."""
+    last_index = load_progress()
+    part = (last_index // 50000) + 1
 
     while True:
         issues = fetch_issues(last_index)
@@ -151,34 +213,23 @@ def process_issues():
             print("No more issues to process.")
             break
 
-        part_file = os.path.join(OUTPUT_DIR, f"issues_part_{part}.jsonl")
-        with open(part_file, "a", encoding="utf-8") as f:
-            for issue in issues:
-                issue_key = issue["key"]
-                summary = issue["fields"].get("summary", "No Summary")
-                description = issue["fields"].get("description", "No Description")
-                
-                # Process issue attachments
-                attachments = []
-                for attachment in issue["fields"].get("attachment", []):
-                    filename = f"{issue_key}_{attachment['filename']}"
-                    file_path = download_attachment(attachment["content"], filename)
-                    if file_path:
-                        attachments.append({"filename": attachment["filename"], "path": file_path})
+        output_file = os.path.join(OUTPUT_DIR, f"issues_part_{part}.jsonl")
+        queue = Queue()
 
-                # Fetch comments and check for attachments
-                comments = fetch_comments(issue_key)
+        for issue in issues:
+            queue.put(issue)
 
-                # Save issue as a JSON line
-                f.write(json.dumps({
-                    "issue_key": issue_key,
-                    "summary": summary,
-                    "description": description,
-                    "attachments": attachments,
-                    "comments": comments
-                }) + "\n")
+        threads = []
+        for _ in range(NUM_THREADS):
+            t = threading.Thread(target=worker, args=(queue, output_file))
+            t.start()
+            threads.append(t)
 
-            last_index += len(issues)
+        for t in threads:
+            t.join()
+
+        last_index += len(issues)
+        save_progress(last_index)
 
         # Rotate file every 50,000 issues
         if last_index % 50000 == 0:
