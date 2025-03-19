@@ -4,6 +4,7 @@ import requests
 import threading
 from requests.auth import HTTPBasicAuth
 from queue import Queue
+import re
 
 # Jira Configuration
 JIRA_BASE_URL = "https://yourcompany.atlassian.net"
@@ -131,20 +132,28 @@ def download_attachment(url, filename):
             "Accept": "application/octet-stream",  # Force raw file download
             "X-Atlassian-Token": "no-check"
         }
-        
-        # Force direct download
+
+        # Add `?direct=true` to the URL for direct file access
         direct_url = f"{url}?direct=true"
 
         response = requests.get(direct_url, auth=AUTH, headers=headers, stream=True, verify=False)
-        response.raise_for_status()
         
-        # Check content type and disposition
-        content_type = response.headers.get("Content-Type", "").lower()
-        content_disp = response.headers.get("Content-Disposition", "")
+        # Check if response is not a valid file (HTML preview page)
+        if response.status_code == 200 and "text/html" in response.headers.get("Content-Type", ""):
+            # Try to get the actual file URL from the preview page
+            print(f"⚠ Warning: {filename} is a preview page. Extracting file URL...")
 
-        if "text/html" in content_type and "filename=" not in content_disp:
-            print(f"⚠ Warning: {filename} might be a preview page instead of the actual file.")
-            return None  # Skip saving this file
+            # Extract the download link from the preview page HTML using regex
+            download_url_match = re.search(r'window\.location="([^"]+)"', response.text)
+            if download_url_match:
+                download_url = download_url_match.group(1)
+                print(f"🔄 Redirecting to file URL: {download_url}")
+                response = requests.get(download_url, auth=AUTH, headers=headers, stream=True, verify=False)
+            else:
+                print(f"❌ No direct download URL found for {filename}. Skipping file.")
+                return None
+
+        response.raise_for_status()
 
         # Ensure attachments are stored in structured folders
         folder = get_attachment_folder()
