@@ -1,0 +1,183 @@
+import os
+import json
+import requests
+import threading
+from requests.auth import HTTPBasicAuth
+
+# Jira Configuration
+JIRA_BASE_URL = "https://yourcompany.atlassian.net"
+PROJECT_KEY = "YOUR_PROJECT_KEY"
+USERNAME = "your-email@example.com"
+PASSWORD = "your-password"  # Use securely, consider environment variables
+
+# Output Directories
+OUTPUT_DIR = "exported_issues"
+ATTACHMENTS_DIR = os.path.join(OUTPUT_DIR, "attachments")
+CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, "export_progress.json")
+
+# Ensure directories exist
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+
+# Pagination & Performance Settings
+BATCH_SIZE = 500
+MAX_RETRIES = 3
+NUM_THREADS = 5
+
+# Authenticate and Get Session Token
+def get_jira_session():
+    """Authenticate using username & password and return session headers."""
+    auth_url = f"{JIRA_BASE_URL}/rest/auth/1/session"
+    response = requests.post(auth_url, json={"username": USERNAME, "password": PASSWORD})
+    
+    if response.status_code == 200:
+        session = response.json()["session"]
+        return {"Accept": "application/json", "Cookie": f"{session['name']}={session['value']}"}
+    else:
+        raise Exception(f"Failed to authenticate: {response.text}")
+
+# Load Session Headers
+HEADERS = get_jira_session()
+
+def load_checkpoint():
+    """Load the last export progress from the checkpoint file."""
+    if os.path.exists(CHECKPOINT_FILE):
+        with open(CHECKPOINT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"last_index": 0, "part": 1}
+
+def save_checkpoint(last_index, part):
+    """Save the last processed issue index for resuming."""
+    with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
+        json.dump({"last_index": last_index, "part": part}, f)
+
+def fetch_issues(start_at):
+    """Fetch issues in batches from Jira."""
+    url = f"{JIRA_BASE_URL}/rest/api/3/search"
+    params = {
+        "jql": f"project={PROJECT_KEY}",
+        "startAt": start_at,
+        "maxResults": BATCH_SIZE,
+        "fields": "summary,description,attachment"
+    }
+    
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            response = requests.get(url, headers=HEADERS, params=params)
+            response.raise_for_status()
+            return response.json().get("issues", [])
+        except requests.RequestException as e:
+            print(f"Retrying due to error: {e}")
+            retries += 1
+    return []
+
+def fetch_comments(issue_key):
+    """Fetch comments for an issue, including attachments."""
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
+    
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            response = requests.get(url, headers=HEADERS)
+            response.raise_for_status()
+            comments = response.json().get("comments", [])
+            
+            formatted_comments = []
+            for comment in comments:
+                body = comment.get("body", "No Comment")
+                attachments = []
+                
+                # Check if attachments exist in comments
+                if "attachment" in comment:
+                    for attachment in comment["attachment"]:
+                        filename = f"{issue_key}_comment_{attachment['filename']}"
+                        file_path = download_attachment(attachment["content"], filename)
+                        attachments.append({"filename": attachment["filename"], "path": file_path})
+                
+                formatted_comments.append({
+                    "author": comment.get("author", {}).get("displayName", "Unknown"),
+                    "body": body,
+                    "attachments": attachments
+                })
+            return formatted_comments
+        except requests.RequestException as e:
+            print(f"Error fetching comments for {issue_key}: {e}")
+            retries += 1
+    return []
+
+def download_attachment(url, filename):
+    """Download an attachment and save it."""
+    try:
+        response = requests.get(url, headers=HEADERS, stream=True)
+        response.raise_for_status()
+        
+        filepath = os.path.join(ATTACHMENTS_DIR, filename)
+        with open(filepath, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return filepath
+    except requests.RequestException as e:
+        print(f"Failed to download {filename}: {e}")
+        return None
+
+def process_issues():
+    """Fetch, process, and store issues with comments and attachments."""
+    checkpoint = load_checkpoint()
+    last_index = checkpoint["last_index"]
+    part = checkpoint["part"]
+
+    while True:
+        issues = fetch_issues(last_index)
+        if not issues:
+            print("No more issues to process.")
+            break
+
+        part_file = os.path.join(OUTPUT_DIR, f"issues_part_{part}.jsonl")
+        with open(part_file, "a", encoding="utf-8") as f:
+            for issue in issues:
+                issue_key = issue["key"]
+                summary = issue["fields"].get("summary", "No Summary")
+                description = issue["fields"].get("description", "No Description")
+                
+                # Process issue attachments in parallel
+                attachments = []
+                attachment_threads = []
+                for attachment in issue["fields"].get("attachment", []):
+                    filename = f"{issue_key}_{attachment['filename']}"
+                    thread = threading.Thread(
+                        target=lambda: attachments.append({
+                            "filename": attachment["filename"],
+                            "path": download_attachment(attachment["content"], filename)
+                        })
+                    )
+                    thread.start()
+                    attachment_threads.append(thread)
+
+                for thread in attachment_threads:
+                    thread.join()
+
+                # Fetch comments
+                comments = fetch_comments(issue_key)
+
+                # Save issue as a JSON line
+                f.write(json.dumps({
+                    "issue_key": issue_key,
+                    "summary": summary,
+                    "description": description,
+                    "attachments": attachments,
+                    "comments": comments
+                }) + "\n")
+
+            last_index += len(issues)
+            save_checkpoint(last_index, part)
+        
+        # Rotate to a new file every 50,000 issues
+        if last_index % 50000 == 0:
+            part += 1
+            save_checkpoint(last_index, part)
+
+    print(f"Export completed! Issues saved in {OUTPUT_DIR}")
+
+if __name__ == "__main__":
+    process_issues()
