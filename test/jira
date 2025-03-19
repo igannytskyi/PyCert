@@ -128,8 +128,8 @@ def download_attachment(url, filename):
     """Download an attachment from Jira and save it correctly."""
     try:
         headers = {
-            "Accept": "*/*",
-            "X-Atlassian-Token": "no-check"  # Prevents Jira from serving preview pages
+            "Accept": "application/octet-stream",  # Force raw file download
+            "X-Atlassian-Token": "no-check"
         }
         
         # Force direct download
@@ -138,10 +138,13 @@ def download_attachment(url, filename):
         response = requests.get(direct_url, auth=AUTH, headers=headers, stream=True, verify=False)
         response.raise_for_status()
         
-        # Check content type to avoid HTML preview pages
+        # Check content type and disposition
         content_type = response.headers.get("Content-Type", "").lower()
-        if "text/html" in content_type:
+        content_disp = response.headers.get("Content-Disposition", "")
+
+        if "text/html" in content_type and "filename=" not in content_disp:
             print(f"⚠ Warning: {filename} might be a preview page instead of the actual file.")
+            return None  # Skip saving this file
 
         # Ensure attachments are stored in structured folders
         folder = get_attachment_folder()
@@ -151,9 +154,10 @@ def download_attachment(url, filename):
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
+        print(f"✅ Downloaded: {filename}")
         return filepath
     except requests.RequestException as e:
-        print(f"Failed to download {filename}: {e}")
+        print(f"❌ Failed to download {filename}: {e}")
         return None
 
 def save_progress(last_index):
