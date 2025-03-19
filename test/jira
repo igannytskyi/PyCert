@@ -1,48 +1,134 @@
 import os
-import requests
 import json
+import requests
+import threading
 from requests.auth import HTTPBasicAuth
-from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 
-# Set up your Jira URL and authentication
-JIRA_URL = "https://your-jira-instance.atlassian.net"
-USERNAME = "your-username"  # Jira username
-PASSWORD = "your-password"  # Jira password (using basic authentication)
-AUTH = HTTPBasicAuth(USERNAME, PASSWORD)
+# Jira Configuration
+JIRA_BASE_URL = "https://yourcompany.atlassian.net"
+PROJECT_KEY = "YOUR_PROJECT_KEY"
+USERNAME = "your-email@example.com"
+PASSWORD = "your-password"  # Store securely
 
-# Function to get the attachment folder (split by groups of 500 files)
-def get_attachment_folder():
-    base_folder = "./attachments"
-    if not os.path.exists(base_folder):
-        os.makedirs(base_folder)
+# Output Directories
+OUTPUT_DIR = "exported_issues"
+ATTACHMENTS_DIR = os.path.join(OUTPUT_DIR, "attachments")
+CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, "export_progress.json")
 
-    # Get a list of existing folders and check how many files are in each folder
-    folders = [f.path for f in os.scandir(base_folder) if f.is_dir()]
-    folders.sort()  # Sort folders by name
-    if not folders:
-        folder_name = "folder_1"
-    else:
-        folder_name = f"folder_{len(folders) + 1}"
+# Ensure directories exist
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
-    folder_path = os.path.join(base_folder, folder_name)
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
+# Attachment folder management
+MAX_FILES_PER_FOLDER = 500
+attachment_folder_index = 1
+current_attachment_folder = os.path.join(ATTACHMENTS_DIR, f"part_{attachment_folder_index}")
+os.makedirs(current_attachment_folder, exist_ok=True)
+
+# Pagination & Performance Settings
+BATCH_SIZE = 500
+MAX_RETRIES = 3
+NUM_THREADS = 5  # Number of concurrent threads
+
+# Authenticate and Get Session Token
+def get_jira_session():
+    """Authenticate using username & password and return session headers."""
+    auth = HTTPBasicAuth(USERNAME, PASSWORD)
+    headers = {"Accept": "application/json"}
+    return auth, headers
+
+# Load authentication
+AUTH, HEADERS = get_jira_session()
+
+def fetch_issues(start_at):
+    """Fetch issues in batches from Jira API v2."""
+    url = f"{JIRA_BASE_URL}/rest/api/2/search"
+    params = {
+        "jql": f"project={PROJECT_KEY}",
+        "startAt": start_at,
+        "maxResults": BATCH_SIZE,
+        "fields": "summary,description,attachment"
+    }
+
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            response = requests.get(url, auth=AUTH, headers=HEADERS, params=params)
+            response.raise_for_status()
+            return response.json().get("issues", [])
+        except requests.RequestException as e:
+            print(f"Retrying due to error: {e}")
+            retries += 1
+    return []
+
+def fetch_comments(issue_key):
+    """Fetch comments for an issue (Jira API v2) and check for attachments."""
+    url = f"{JIRA_BASE_URL}/rest/api/2/issue/{issue_key}/comment"
+
+    retries = 0
+    while retries < MAX_RETRIES:
+        try:
+            response = requests.get(url, auth=AUTH, headers=HEADERS)
+            response.raise_for_status()
+            comments = response.json().get("comments", [])
+
+            formatted_comments = []
+            for comment in comments:
+                body = comment.get("body", "No Comment")
+                author = comment.get("author", {}).get("displayName", "Unknown")
+                attachments = []
+
+                # Check for manually added attachment URLs in comment body
+                if "[^" in body:  # Jira attachment format: [^filename.ext]
+                    attachments = extract_attachments(body, issue_key)
+
+                formatted_comments.append({
+                    "author": author,
+                    "body": body,
+                    "attachments": attachments
+                })
+            return formatted_comments
+        except requests.RequestException as e:
+            print(f"Error fetching comments for {issue_key}: {e}")
+            retries += 1
+    return []
+
+def extract_attachments(comment_body, issue_key):
+    """Extract attachment file names from comment body and download them."""
+    import re
+    attachment_pattern = r"\[\^([^\]]+)\]"  # Matches [^filename.ext]
+    matches = re.findall(attachment_pattern, comment_body)
+
+    attachments = []
+    for filename in matches:
+        file_url = f"{JIRA_BASE_URL}/secure/attachment/{filename}"
+        file_path = download_attachment(issue_key, filename, f"{issue_key}_comment_{filename}")
+        if file_path:
+            attachments.append({"filename": filename, "path": file_path})
     
-    # Check the number of files in the folder, and if it exceeds 500, create a new folder
-    current_files = len([f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))])
-    if current_files >= 500:
-        folder_name = f"folder_{len(folders) + 2}"
-        folder_path = os.path.join(base_folder, folder_name)
-        os.makedirs(folder_path)
+    return attachments
 
-    return folder_path
+def get_attachment_folder():
+    """Ensures that attachments are stored in folders with max 500 files each."""
+    global attachment_folder_index, current_attachment_folder
 
-# Function to download an attachment using Jira's metadata API
+    # Count current files in folder
+    current_file_count = len(os.listdir(current_attachment_folder))
+
+    # If the current folder reaches the limit, create a new folder
+    if current_file_count >= MAX_FILES_PER_FOLDER:
+        attachment_folder_index += 1
+        current_attachment_folder = os.path.join(ATTACHMENTS_DIR, f"part_{attachment_folder_index}")
+        os.makedirs(current_attachment_folder, exist_ok=True)
+
+    return current_attachment_folder
+
 def download_attachment(issue_key, attachment_id, filename):
     """Download an attachment from Jira using the attachment API and save it."""
     try:
         # Construct the API URL to get attachment metadata for the specific attachment
-        metadata_url = f"{JIRA_URL}/rest/api/2/issue/{issue_key}/attachments/{attachment_id}"
+        metadata_url = f"{JIRA_BASE_URL}/rest/api/2/issue/{issue_key}/attachments/{attachment_id}"
 
         # Make a GET request to fetch attachment metadata
         response = requests.get(metadata_url, auth=AUTH, headers={"Accept": "application/json"}, verify=False)
@@ -75,82 +161,87 @@ def download_attachment(issue_key, attachment_id, filename):
         print(f"❌ Failed to download {filename}: {e}")
         return None
 
-# Function to export all issues from a project
-def export_issues(project_key):
-    """Export all issues from a Jira project, including attachments and comments."""
-    try:
-        # Jira REST API endpoint for getting issues
-        jql_url = f"{JIRA_URL}/rest/api/2/search"
-        query = {
-            'jql': f'project={project_key}',
-            'fields': 'summary,description,comment,attachments',
-            'maxResults': 1000,  # Adjust based on the number of issues you want to fetch at once
-        }
+def save_progress(last_index):
+    """Save export progress for resuming."""
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump({"last_index": last_index}, f)
 
-        # Make the GET request to fetch the issues
-        response = requests.get(jql_url, auth=AUTH, params=query, headers={"Accept": "application/json"}, verify=False)
-        response.raise_for_status()
+def load_progress():
+    """Load the last export progress point."""
+    if os.path.exists(CHECKPOINT_FILE):
+        with open(CHECKPOINT_FILE, "r") as f:
+            return json.load(f).get("last_index", 0)
+    return 0
 
-        issues = response.json()['issues']
-        print(f"Found {len(issues)} issues in project {project_key}")
+def process_issue(issue):
+    """Process an individual issue (fetch comments & attachments)."""
+    issue_key = issue["key"]
+    summary = issue["fields"].get("summary", "No Summary")
+    description = issue["fields"].get("description", "No Description")
 
-        # Prepare to download attachments concurrently using threading
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = []
-            
-            # Iterate over each issue and process attachments and comments
-            for issue in issues:
-                issue_key = issue['key']
-                issue_fields = issue['fields']
-                filename = f"{issue_key}.json"
+    # Process issue attachments
+    attachments = []
+    for attachment in issue["fields"].get("attachment", []):
+        attachment_id = attachment["id"]
+        filename = f"{issue_key}_{attachment['filename']}"
+        file_path = download_attachment(issue_key, attachment_id, filename)
+        if file_path:
+            attachments.append({"filename": attachment["filename"], "path": file_path})
 
-                # Prepare the issue data to export
-                issue_data = {
-                    "key": issue_key,
-                    "summary": issue_fields.get('summary'),
-                    "description": issue_fields.get('description'),
-                    "comments": []
-                }
+    # Fetch comments and check for attachments
+    comments = fetch_comments(issue_key)
 
-                # Handle comments
-                comments_url = f"{JIRA_URL}/rest/api/2/issue/{issue_key}/comment"
-                comments_response = requests.get(comments_url, auth=AUTH, headers={"Accept": "application/json"}, verify=False)
-                comments_response.raise_for_status()
+    return {
+        "issue_key": issue_key,
+        "summary": summary,
+        "description": description,
+        "attachments": attachments,
+        "comments": comments
+    }
 
-                comments = comments_response.json()['comments']
-                for comment in comments:
-                    issue_data['comments'].append({
-                        'author': comment['author']['displayName'],
-                        'body': comment['body']
-                    })
+def worker(queue, output_file):
+    """Thread worker function to process issues from queue."""
+    while not queue.empty():
+        issue = queue.get()
+        processed_issue = process_issue(issue)
+        with open(output_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(processed_issue) + "\n")
+        queue.task_done()
 
-                # Handle attachments
-                if 'attachments' in issue_fields:
-                    for attachment in issue_fields['attachments']:
-                        attachment_id = attachment['id']
-                        attachment_filename = attachment['filename']
+def process_issues():
+    """Fetch, process, and store issues with comments and attachments using multi-threading."""
+    last_index = load_progress()
+    part = (last_index // 50000) + 1
 
-                        # Download the attachment using threading
-                        futures.append(executor.submit(download_attachment, issue_key, attachment_id, attachment_filename))
-                    
-                        # Add the attachment to the issue data (path where it is saved)
-                        issue_data.setdefault('attachments', []).append(attachment_filename)
+    while True:
+        issues = fetch_issues(last_index)
+        if not issues:
+            print("No more issues to process.")
+            break
 
-                # Save the issue data to a file (JSON format)
-                folder = get_attachment_folder()
-                filepath = os.path.join(folder, filename)
+        output_file = os.path.join(OUTPUT_DIR, f"issues_part_{part}.jsonl")
+        queue = Queue()
 
-                with open(filepath, 'w') as json_file:
-                    json.dump(issue_data, json_file, indent=4)
+        for issue in issues:
+            queue.put(issue)
 
-                print(f"✅ Exported issue: {issue_key}")
+        threads = []
+        for _ in range(NUM_THREADS):
+            t = threading.Thread(target=worker, args=(queue, output_file))
+            t.start()
+            threads.append(t)
 
-            # Wait for all downloads to complete
-            for future in futures:
-                future.result()  # This will block until the download is finished
+        for t in threads:
+            t.join()
 
-    except requests.RequestException as e:
-        print(f"❌ Failed to export issues: {e}")
+        last_index += len(issues)
+        save_progress(last_index)
 
-# Example Usage: Export issues from a specific Jira project
-export_issues('PROJECT_KEY')  # Replace 'PROJECT_KEY' with your Jira project key
+        # Rotate file every 50,000 issues
+        if last_index % 50000 == 0:
+            part += 1
+
+    print(f"Export completed! Issues saved in {OUTPUT_DIR}")
+
+if __name__ == "__main__":
+    process_issues()
